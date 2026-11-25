@@ -129,3 +129,90 @@ class BatchSummary(BaseModel):
     cloud_threshold: float
     parcel_count: int
     scene_count: int
+
+
+# ---------- 同景认定 / 影像组 ----------
+
+
+class SceneRef(BaseModel):
+    """场景定位：批次号 + 来源行号。"""
+
+    batch_id: int = Field(..., ge=1, description="场景所属上传批次号")
+    source_line: int = Field(..., ge=1, description="场景在该批次中的原始来源行号")
+
+
+class SameSceneAssertionRequest(BaseModel):
+    action: str = Field(
+        ..., description="assert=登记同景认定；revoke=撤销同景认定"
+    )
+    first_scene: SceneRef
+    second_scene: SceneRef
+
+    @field_validator("action")
+    @classmethod
+    def _check_action(cls, v: str) -> str:
+        if v not in ("assert", "revoke"):
+            raise ValueError("action 只能是 assert 或 revoke")
+        return v
+
+    @model_validator(mode="after")
+    def _check_distinct_refs(self) -> "SameSceneAssertionRequest":
+        a, b = self.first_scene, self.second_scene
+        if a.batch_id == b.batch_id and a.source_line == b.source_line:
+            raise ValueError("first_scene 与 second_scene 不能是同一条场景")
+        return self
+
+
+class SceneIdentityOut(BaseModel):
+    scene_id: int
+    batch_id: int
+    source_line: int
+    scene_no: str
+    observation_date: str
+
+
+class AssertedGroupOut(BaseModel):
+    group_no: str
+    reused: bool = Field(..., description="true=成员未变沿用现号；false=成员变化发放新号")
+    scene_ids: List[int]
+
+
+class SameSceneAssertionResponse(BaseModel):
+    action: str
+    assertion_id: int
+    first_scene: SceneIdentityOut
+    second_scene: SceneIdentityOut
+    group_nos: List[str] = Field(..., description="本次修改涉及场景当前所在的全部组号")
+    groups: List[AssertedGroupOut]
+
+
+class GroupMemberOut(SceneIdentityOut):
+    pass
+
+
+class CurrentGroupOut(BaseModel):
+    group_no: str
+    members: List[GroupMemberOut]
+
+
+class OldGroupTraceResponse(BaseModel):
+    old_group_no: str
+    original_members: List[GroupMemberOut] = Field(..., description="旧组号快照中的原成员")
+    current_groups: List[CurrentGroupOut] = Field(
+        ..., description="每个仍含有原成员的现组列一次，members 仅列落在其中的原成员"
+    )
+
+
+class AssertionEventScene(BaseModel):
+    batch_id: int
+    source_line: int
+    scene_no: str
+    observation_date: str
+
+
+class AssertionEventOut(BaseModel):
+    assertion_id: int
+    action: str
+    created_at: str
+    first_scene: AssertionEventScene
+    second_scene: AssertionEventScene

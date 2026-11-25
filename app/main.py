@@ -9,7 +9,7 @@ from typing import List
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
-from . import schemas
+from . import groups, schemas
 from .database import get_conn, init_db
 from .selection import Candidate, select_scenes
 
@@ -276,3 +276,85 @@ def list_scenes(batch_id: int, conn: sqlite3.Connection = Depends(db)):
         "cloud_cover, source_line FROM scenes WHERE batch_id=? ORDER BY id",
         (batch_id,),
     ).fetchall()]
+
+
+# ---------------- 同景认定与影像组 ----------------
+
+
+@app.post(
+    "/same-scene-assertions",
+    response_model=schemas.SameSceneAssertionResponse,
+    status_code=201,
+    tags=["同景认定"],
+)
+def same_scene_assertion(
+    payload: schemas.SameSceneAssertionRequest,
+    conn: sqlite3.Connection = Depends(db),
+):
+    """登记或撤销两条场景的同景认定（按各自批次号 + 来源行号定位）。
+
+    - 仅允许同一 UTC 观测日的两条场景进行认定，否则 409。
+    - 同景认定可传递：认定关系构成无向图，连通分量即同一影像组。
+    - 关系与组号在同一事务内生效：分量成员变化发新组号，成员没变沿用现号；
+      任一步失败整体回滚，失败后查询仍是改动前的结果。
+    - 撤销后不再与任何场景相连的参与场景会单独成组（同样发新号）。
+    - 返回本次涉及场景当前所在的全部组号。
+    """
+    try:
+        result = groups.apply_assertion(
+            conn,
+            payload.action,
+            (payload.first_scene.batch_id, payload.first_scene.source_line),
+            (payload.second_scene.batch_id, payload.second_scene.source_line),
+        )
+    except groups.GroupingError as exc:
+        raise HTTPException(exc.status_code, exc.detail)
+    return schemas.SameSceneAssertionResponse(**result)
+
+
+@app.get(
+    "/scene-groups",
+    response_model=List[schemas.CurrentGroupOut],
+    tags=["同景认定"],
+)
+def list_scene_groups(conn: sqlite3.Connection = Depends(db)):
+    """列出全部当前影像组（只有参与过认定的场景才在组内）。"""
+    return [schemas.CurrentGroupOut(**g) for g in groups.list_current_groups(conn)]
+
+
+@app.get(
+    "/scene-groups/{group_no}",
+    response_model=schemas.CurrentGroupOut,
+    tags=["同景认定"],
+)
+def get_scene_group(group_no: str, conn: sqlite3.Connection = Depends(db)):
+    """按组号查看某个当前影像组的成员。"""
+    try:
+        result = groups.get_current_group(conn, group_no)
+    except groups.GroupingError as exc:
+        raise HTTPException(exc.status_code, exc.detail)
+    return schemas.CurrentGroupOut(**result)
+
+
+@app.get(
+    "/scene-groups/by-old-no/{old_group_no}",
+    response_model=schemas.OldGroupTraceResponse,
+    tags=["同景认定"],
+)
+def trace_old_scene_group(old_group_no: str, conn: sqlite3.Connection = Depends(db)):
+    """按旧组号找回原成员去向：每个仍含有原成员的现组列一次，并列出落在其中的原成员。"""
+    try:
+        result = groups.trace_old_group(conn, old_group_no)
+    except groups.GroupingError as exc:
+        raise HTTPException(exc.status_code, exc.detail)
+    return schemas.OldGroupTraceResponse(**result)
+
+
+@app.get(
+    "/same-scene-assertions",
+    response_model=List[schemas.AssertionEventOut],
+    tags=["同景认定"],
+)
+def list_same_scene_assertions(conn: sqlite3.Connection = Depends(db)):
+    """列出同景认定事件流（append-only，含已撤销事件），便于核查与排障。"""
+    return [schemas.AssertionEventOut(**e) for e in groups.list_assertion_events(conn)]

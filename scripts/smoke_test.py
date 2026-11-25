@@ -105,6 +105,99 @@ def main(base: str) -> None:
     status, batches = call("GET", base, "/batches")
     check("失败上传未产生新批次（仍为 2 个）", status == 200 and len(batches) == 2)
 
+    # --- 4. 同景认定：拆组再合并、撤销后仍相连、旧组号回溯 ---
+    # 新批次：同一 UTC 观测日 4 条场景 A/B/C/D（行号 1~4）+ 异日场景 X（行号 5）
+    payload3 = {"cloud_threshold": 50,
+                "parcels": [parcel("P1")],
+                "scenes": [
+                    scene("A", "2026-06-01", 99, 29, 10, 1),
+                    scene("B", "2026-06-01", 99, 29, 10, 2),
+                    scene("C", "2026-06-01", 99, 29, 10, 3),
+                    scene("D", "2026-06-01", 99, 29, 10, 4),
+                    scene("X", "2026-06-02", 99, 29, 10, 5)]}
+    status, up3 = call("POST", base, "/uploads", payload3)
+    check("第三次上传 201", status == 201)
+    b3 = up3["batch_id"]
+
+    def assert_edge(action, line_a, line_b):
+        return call("POST", base, "/same-scene-assertions", {
+            "action": action,
+            "first_scene": {"batch_id": b3, "source_line": line_a},
+            "second_scene": {"batch_id": b3, "source_line": line_b}})
+
+    # 4.1 链式登记 A-B、B-C：传递性使 A/B/C 同组，每次成员变化都发新号
+    status, ab = assert_edge("assert", 1, 2)
+    check("登记 A-B -> G1（新号）",
+          status == 201 and ab["group_nos"] == ["G1"] and ab["groups"][0]["reused"] is False)
+
+    def ids_of(group_no):
+        """读取当前组的成员 scene_id 集合。"""
+        st, gs = call("GET", base, "/scene-groups")
+        assert st == 200
+        for g in gs:
+            if g["group_no"] == group_no:
+                return {m["scene_id"] for m in g["members"]}
+        return set()
+
+    status, bc = assert_edge("assert", 2, 3)
+    check("登记 B-C 传递合并 -> G2（新号）",
+          status == 201 and bc["group_nos"] == ["G2"]
+          and set(bc["groups"][0]["scene_ids"]) == ids_of("G2")
+          and len(ids_of("G2")) == 3)
+    # 冗余登记 A-C（已连通）：成员没变，沿用 G2
+    status, ac = assert_edge("assert", 1, 3)
+    check("冗余登记 A-C -> 沿用 G2",
+          status == 201 and ac["group_nos"] == ["G2"] and ac["groups"][0]["reused"] is True)
+    # 异日认定被拒（payload2 批次里 2026-05-02 的行号 5）
+    status, cross_day = assert_edge("assert", 1, 5)
+    check("同 UTC 观测日校验：异日 409", status == 409, str(cross_day))
+
+    # 4.2 拆组：撤销 A-B。因 A-C 仍在，A/B/C 仍连通 -> 成员没变，沿用 G2
+    status, revoke_ab = assert_edge("revoke", 1, 2)
+    check("撤销 A-B 后仍经 A-C 相连 -> 沿用 G2",
+          status == 201 and revoke_ab["group_nos"] == ["G2"]
+          and revoke_ab["groups"][0]["reused"] is True)
+
+    # 4.3 再撤 A-C 真正拆组：{A} 单独成组、{B,C} 一组，均发新号（号段不写死）
+    status, revoke_ac = assert_edge("revoke", 1, 3)
+    new_nos = set(revoke_ac["group_nos"])
+    check("撤销 A-C 拆组 -> 单点组与二元组均发新号",
+          status == 201 and len(new_nos) == 2 and "G2" not in new_nos
+          and all(g["reused"] is False for g in revoke_ac["groups"]))
+    status, groups_now = call("GET", base, "/scene-groups")
+    current = {g["group_no"]: {m["scene_id"] for m in g["members"]} for g in groups_now}
+    check("当前组恰为拆出的两个组（单点 + 二元），D 未参与认定不在任何组",
+          status == 200 and set(current) == new_nos
+          and sorted(len(ids) for ids in current.values()) == [1, 2])
+    singleton_no = next(no for no in new_nos if len(current[no]) == 1)
+    pair_no = next(no for no in new_nos if len(current[no]) == 2)
+    g3, id_bc = current[singleton_no], current[pair_no]
+
+    # 4.4 合并：重新登记 A-B，单点组与二元组合并为新组
+    status, remerge = assert_edge("assert", 1, 2)
+    merged_no = remerge["group_nos"][0]
+    check("拆组后再合并 -> 发新号且含 A/B/C 三个成员",
+          status == 201 and len(remerge["group_nos"]) == 1
+          and merged_no not in new_nos and remerge["groups"][0]["reused"] is False
+          and set(remerge["groups"][0]["scene_ids"]) == g3 | id_bc
+          and len(remerge["groups"][0]["scene_ids"]) == 3)
+
+    # 4.5 旧组号 G2 回溯：原成员 A/B/C 现全部在合并后的新组，现组只列一次
+    status, trace = call("GET", base, "/scene-groups/by-old-no/G2")
+    check("旧组号 G2 回溯：原成员齐全，现组只列一次且仅列原成员",
+          status == 200
+          and len(trace["original_members"]) == 3
+          and [g["group_no"] for g in trace["current_groups"]] == [merged_no]
+          and {m["scene_id"] for m in trace["current_groups"][0]["members"]} == g3 | id_bc)
+
+    # 4.6 撤销不存在的关系 404，且不写入事件流
+    status, before_events = call("GET", base, "/same-scene-assertions")
+    n_events = len(before_events)
+    status, _ = assert_edge("revoke", 3, 4)
+    check("撤销不存在的认定 -> 404", status == 404)
+    status, after_events = call("GET", base, "/same-scene-assertions")
+    check("404 不产生事件写入", status == 200 and len(after_events) == n_events)
+
     print("\n全部冒烟检查通过 ✔")
 
 

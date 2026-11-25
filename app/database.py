@@ -73,6 +73,41 @@ CREATE TABLE IF NOT EXISTS delivery_scenes (
     cloud_cover REAL NOT NULL,
     PRIMARY KEY (delivery_id, parcel_uid)
 );
+
+-- 同景认定事件流（append-only）：一对场景的最后一条事件决定该关系当前是否有效。
+-- scene_a_id/scene_b_id 规范化为较小/较大 scene_id，撤销只追加 revoke，不物理删除。
+CREATE TABLE IF NOT EXISTS same_scene_assertions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_a_id  INTEGER NOT NULL REFERENCES scenes(id),
+    scene_b_id  INTEGER NOT NULL REFERENCES scenes(id),
+    action      TEXT NOT NULL CHECK (action IN ('assert', 'revoke')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ssa_pair ON same_scene_assertions(scene_a_id, scene_b_id);
+
+-- 影像组号：分量成员每次发生变化就发放新组号，并写入不可变成员快照，
+-- 供数仓按旧组号回溯原成员当前去向。
+CREATE TABLE IF NOT EXISTS scene_groups (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_no             TEXT NOT NULL UNIQUE,           -- 对外影像组号，如 G3
+    source_assertion_id  INTEGER NOT NULL REFERENCES same_scene_assertions(id),
+    change_action        TEXT NOT NULL CHECK (change_action IN ('assert', 'revoke')),
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS scene_group_members (
+    group_no  TEXT NOT NULL REFERENCES scene_groups(group_no),
+    scene_id  INTEGER NOT NULL REFERENCES scenes(id),
+    PRIMARY KEY (group_no, scene_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sgm_scene ON scene_group_members(scene_id);
+
+-- 场景当前所属组：仅参与过认定的场景存在映射；与认定事件在同一事务内替换，
+-- 保证关系与组号一起生效，失败回滚后查到的仍是改动前的结果。
+CREATE TABLE IF NOT EXISTS scene_group_current (
+    scene_id  INTEGER PRIMARY KEY REFERENCES scenes(id),
+    group_no  TEXT NOT NULL REFERENCES scene_groups(group_no)
+);
 """
 
 
