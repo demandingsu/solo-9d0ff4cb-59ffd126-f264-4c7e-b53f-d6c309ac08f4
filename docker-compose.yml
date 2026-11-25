@@ -1,0 +1,16 @@
+services:
+  scene-api:
+    build: .
+    image: ag-scene-api:latest
+    container_name: ag-scene-api
+    ports:
+      - "8000:8000"
+    environment:
+      # SQLite 数据库放在持久化卷中，容器重建后数据与历史交付仍保留
+      SCENE_DB_PATH: /app/data/scenes.db
+    volumes:
+      - scene-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  scene-data:

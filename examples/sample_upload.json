@@ -1,0 +1,13 @@
+{
+  "cloud_threshold": 50,
+  "parcels": [
+    {"parcel_uid": "P-001", "min_lon": 100.0, "min_lat": 30.0, "max_lon": 101.0, "max_lat": 31.0},
+    {"parcel_uid": "P-002", "min_lon": 102.0, "min_lat": 30.0, "max_lon": 103.0, "max_lat": 31.0}
+  ],
+  "scenes": [
+    {"scene_no": "S101", "observation_date": "2026-05-01", "min_lon": 99.0, "min_lat": 29.0, "max_lon": 101.5, "max_lat": 31.5, "cloud_cover": 30.0, "source_line": 2},
+    {"scene_no": "S102", "observation_date": "2026-05-01", "min_lon": 101.0, "min_lat": 29.0, "max_lon": 103.5, "max_lat": 31.5, "cloud_cover": 30.0, "source_line": 3},
+    {"scene_no": "S201", "observation_date": "2026-05-02", "min_lon": 99.0, "min_lat": 29.0, "max_lon": 101.5, "max_lat": 31.5, "cloud_cover": 15.0, "source_line": 5},
+    {"scene_no": "S202", "observation_date": "2026-05-02", "min_lon": 101.0, "min_lat": 29.0, "max_lon": 103.5, "max_lat": 31.5, "cloud_cover": 15.0, "source_line": 6}
+  ]
+}
